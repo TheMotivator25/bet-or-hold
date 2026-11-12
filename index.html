@@ -214,7 +214,11 @@ async function tick() {
   try {
     if (isHost) await hostView();
     else if (code) await playerView();
-    else app.innerHTML = `<div class="card"><h1>Bet or Hold</h1><p>Scan the QR code on the screen to join.</p><p class="muted">Presenter? <a href="?host">Start a game</a>.</p></div>`;
+    else {
+      const { data } = await sb.from("games").select("code").neq("phase", "done").order("created_at", { ascending: false }).limit(1);
+      if (data && data.length) { code = data[0].code; history.replaceState(null, "", "?g=" + code); await playerView(); }
+      else app.innerHTML = `<div class="card"><h1>Bet or Hold</h1><p>Waiting for the presenter to open a game. This page will update.</p></div>`;
+    }
   } catch (e) { console.error(e); }
 }
 tick();

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bet or Hold</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root { --teal:#26a69a; --dark:#1d1d1f; --cream:#fffdf2; --red:#c0392b; --green:#1e8449; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: Georgia, "Times New Roman", serif; background:var(--cream); color:var(--dark); }
+  header { background:var(--teal); color:#fff; padding:14px 20px; font-size:22px; }
+  main { max-width:900px; margin:0 auto; padding:20px; }
+  .card { background:#fff; border:1px solid #e5e2d0; border-radius:10px; padding:20px; margin-bottom:16px; }
+  h1 { font-size:30px; margin:0 0 8px; } h2 { margin:0 0 10px; }
+  .big { font-size:46px; font-weight:bold; }
+  button { background:var(--teal); color:#fff; border:0; border-radius:8px; padding:14px 22px; font-size:18px; cursor:pointer; font-family:inherit; }
+  button:disabled { opacity:.5; cursor:default; }
+  input[type=text] { font-size:18px; padding:12px; width:100%; border:1px solid #ccc; border-radius:8px; margin-bottom:12px; font-family:inherit; }
+  input[type=range] { width:100%; margin:16px 0; }
+  .muted { color:#666; } .win { color:var(--green); } .lose { color:var(--red); }
+  .row { display:flex; gap:16px; flex-wrap:wrap; } .row > .card { flex:1; min-width:240px; }
+  .die { display:inline-block; width:90px; height:90px; line-height:90px; text-align:center; font-size:52px; border:3px solid var(--dark); border-radius:14px; background:#fff; margin:6px; }
+  .bar { height:38px; background:var(--teal); color:#fff; padding:0 10px; line-height:38px; border-radius:4px; margin:6px 0; white-space:nowrap; }
+  .bar.paper { background:#9e9e9e; }
+  table { border-collapse:collapse; width:100%; } td,th { padding:6px 8px; border-bottom:1px solid #eee; text-align:left; }
+  #qr img, #qr canvas { margin:10px auto; }
+</style>
+</head>
+<body>
+<header>Bet or Hold</header>
+<main id="app"><div class="card">Loading...</div></main>
+
+<script>
+// ====== CONFIG: paste from Supabase > Project Settings > API ======
+const SUPABASE_URL = "https://gjcpznzzpwifuzdlxjul.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_g7Y4r_2TCRIE5JRrrjKCYA_WlPHCCxa";
+// ==================================================================
+
+const ROUNDS = 3, ENDOW = 10, POLL_MS = 1500;
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const app = document.getElementById("app");
+const params = new URLSearchParams(location.search);
+const isHost = params.has("host");
+let code = params.get("g") || (isHost ? params.get("host") : null);
+let busy = false;
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const won = r => r <= 2;
+const payoff = (bet, roll) => won(roll) ? bet * 2.5 : -bet;
+const pct = x => (x * 100 / ENDOW).toFixed(1) + "%";
+const avg = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
+const joinUrl = () => location.origin + location.pathname + "?g=" + code;
+
+async function act(fn) { if (busy) return; busy = true; try { await fn(); } catch (e) { alert(e.message || e); } busy = false; tick(); }
+
+// ---------------- HOST ----------------
+async function createGame() {
+  const c = Array.from({ length: 4 }, () => "ABCDEFGHJKMNPQRSTUVWXYZ"[Math.floor(Math.random() * 23)]).join("");
+  const { error } = await sb.from("games").insert({ code: c });
+  if (error) throw error;
+  code = c; history.replaceState(null, "", "?host=" + c);
+}
+const setGame = patch => sb.from("games").update(patch).eq("code", code).then(r => { if (r.error) throw r.error; });
+
+async function hostView() {
+  if (!code) { await createGame(); }
+  const [g, p, b] = await Promise.all([
+    sb.from("games").select("*").eq("code", code).single(),
+    sb.from("players").select("*").eq("code", code),
+    sb.from("bets").select("*").eq("code", code),
+  ]);
+  if (g.error) { app.innerHTML = `<div class="card">Game not found. <a href="?host">Start a new one</a>.</div>`; return; }
+  const game = g.data, players = p.data || [], bets = b.data || [];
+  const H = players.filter(x => x.grp === "H"), L = players.filter(x => x.grp === "L");
+  const betBy = (pid, r) => bets.find(x => x.player_id === pid && x.round === r);
+  let html = "";
+
+  if (game.phase === "lobby") {
+    html = `<div class="row"><div class="card" style="text-align:center">
+      <h1>Scan to join</h1><div id="qr"></div>
+      <div class="muted">${esc(joinUrl())}</div><div class="big">${code}</div></div>
+      <div class="card"><h2>Players: ${players.length}</h2>
+      <p>Group H (feedback every round): <b>${H.length}</b></p>
+      <p>Group L (one bet, locked for 3 rounds): <b>${L.length}</b></p>
+      <p class="muted">Each round you get ${ENDOW} points. Roll 1 or 2: win 2.5 times your bet. Roll 3 to 6: lose your bet.</p>
+      <button id="go" ${players.length ? "" : "disabled"}>Start round 1</button></div></div>`;
+  } else if (game.phase === "betting") {
+    const r = game.round;
+    const hIn = H.filter(x => betBy(x.id, r)).length, lIn = L.filter(x => betBy(x.id, 1)).length;
+    html = `<div class="card"><h1>Round ${r} of ${ROUNDS}: place your bets</h1>
+      <p>Group H bets in: <b>${hIn} / ${H.length}</b></p>
+      <p>Group L bets locked: <b>${lIn} / ${L.length}</b></p>
+      <button id="roll">Roll the die</button></div>`;
+  } else if (game.phase === "rolled") {
+    const r = game.round, roll = game.rolls[r - 1];
+    html = `<div class="card" style="text-align:center"><h1>Round ${r} roll</h1>
+      <div class="die">${roll}</div>
+      <h2 class="${won(roll) ? "win" : "lose"}">${won(roll) ? "WIN: bets pay 2.5x" : "LOSS: bets are lost"}</h2>
+      <p class="muted">Group H sees this now. Group L sees nothing until the end.</p>
+      ${r < ROUNDS ? `<button id="next">Open round ${r + 1}</button>` : `<button id="end">Reveal results</button>`}</div>`;
+  } else {
+    const avgPct = grp => avg(grp.map(pl => avg(bets.filter(x => x.player_id === pl.id).map(x => x.amount))).filter((_, i) => bets.some(x => x.player_id === grp[i].id)));
+    const hA = avgPct(H), lA = avgPct(L);
+    const bar = (label, v, cls = "") => `<div class="bar ${cls}" style="width:${Math.max(v * 10, 8)}%">${label}: ${pct(v)}</div>`;
+    html = `<div class="card"><h1>Results: average bet</h1>
+      <p class="muted">Rolls: ${game.rolls.map(x => `<span class="die" style="width:50px;height:50px;line-height:50px;font-size:28px">${x}</span>`).join("")}</p>
+      <h2>Our class</h2>${bar("H, every round", hA)}${bar("L, every 3 rounds", lA)}
+      <h2>Gneezy &amp; Potters (1997)</h2>${bar("H", 5.05, "paper")}${bar("L", 6.74, "paper")}
+      <h2>${lA > hA ? "Group L bet more. We replicated the effect." : lA === hA ? "No gap this time." : "Group H bet more. Small samples are noisy."}</h2>
+      <button id="again">New game</button></div>`;
+  }
+  app.innerHTML = html;
+
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = () => act(fn); };
+  on("go", () => setGame({ phase: "betting", round: 1 }));
+  on("roll", () => setGame({ phase: "rolled", rolls: [...game.rolls, 1 + Math.floor(Math.random() * 6)] }));
+  on("next", () => setGame({ phase: "betting", round: game.round + 1 }));
+  on("end", () => setGame({ phase: "done" }));
+  on("again", async () => { code = null; await createGame(); });
+  const qr = document.getElementById("qr");
+  if (qr) new QRCode(qr, { text: joinUrl(), width: 260, height: 260 });
+}
+
+// ---------------- PLAYER ----------------
+const pidKey = () => "boh_" + code;
+async function join(name) {
+  const { data: ps } = await sb.from("players").select("grp").eq("code", code);
+  const h = (ps || []).filter(x => x.grp === "H").length, l = (ps || []).length - h;
+  const grp = h < l ? "H" : l < h ? "L" : (Math.random() < .5 ? "H" : "L");
+  const { data, error } = await sb.from("players").insert({ code, name, grp }).select().single();
+  if (error) throw error;
+  localStorage.setItem(pidKey(), data.id);
+}
+async function placeBet(pid, grp, round, amount) {
+  const rows = grp === "L" ? [1, 2, 3].map(r => ({ player_id: pid, code, round: r, amount })) : [{ player_id: pid, code, round, amount }];
+  const { error } = await sb.from("bets").insert(rows);
+  if (error) throw error;
+}
+
+let sliderVal = 5, typing = false;
+async function playerView() {
+  if (typing) return;
+  const pid = localStorage.getItem(pidKey());
+  const g = await sb.from("games").select("*").eq("code", code).single();
+  if (g.error) { app.innerHTML = `<div class="card">Game code not found.</div>`; return; }
+  const game = g.data;
+
+  if (!pid) {
+    if (document.getElementById("name")) return;
+    app.innerHTML = `<div class="card"><h1>Join Bet or Hold</h1>
+      <p class="muted">First name only. You'll be placed in a group automatically.</p>
+      <input id="name" type="text" maxlength="20" placeholder="Your first name">
+      <button id="join">Join</button></div>`;
+    const n = document.getElementById("name");
+    n.onfocus = () => typing = true; n.onblur = () => typing = false;
+    document.getElementById("join").onclick = () => { const v = n.value.trim(); if (!v) return; typing = false; act(() => join(v)); };
+    return;
+  }
+  const [me, myBets] = await Promise.all([
+    sb.from("players").select("*").eq("id", pid).single(),
+    sb.from("bets").select("*").eq("player_id", pid),
+  ]);
+  if (me.error) { localStorage.removeItem(pidKey()); return; }
+  const grp = me.data.grp, bets = myBets.data || [];
+  const bet = r => (bets.find(x => x.round === r) || {}).amount;
+  const tag = grp === "H"
+    ? `<p class="muted">Group H: you bet each round and see every result.</p>`
+    : `<p class="muted">Group L: you make one bet that is locked for all 3 rounds. You see results only at the end.</p>`;
+  const rules = `<p class="muted">Each round: ${ENDOW} points. Roll 1 or 2 wins 2.5x your bet. Roll 3 to 6 loses your bet.</p>`;
+  let html = `<div class="card"><h2>Hi ${esc(me.data.name)}</h2>${tag}`;
+  const r = game.round;
+
+  const slider = (label) => `<h1>${label}</h1>${rules}
+    <div class="big" id="val">${sliderVal}</div>
+    <input id="amt" type="range" min="0" max="${ENDOW}" step="1" value="${sliderVal}">
+    <button id="bet">Lock in bet</button>`;
+
+  if (game.phase === "lobby") html += `<h1>You're in.</h1><p>Waiting for the presenter to start.</p>`;
+  else if (game.phase === "betting") {
+    if (grp === "H") html += bet(r) === undefined ? slider(`Round ${r}: how many points do you bet?`) : `<h1>Bet placed: ${bet(r)}</h1><p>Waiting for the roll.</p>`;
+    else html += bet(1) === undefined ? slider(`How many points do you bet each round? This applies to all 3 rounds.`) : `<h1>Locked: ${bet(1)} per round</h1><p>Results come after round 3.</p>`;
+  } else if (game.phase === "rolled") {
+    const roll = game.rolls[r - 1];
+    if (grp === "H") {
+      const b = bet(r);
+      html += b === undefined ? `<h1>Round ${r}: you didn't bet</h1>`
+        : `<div class="die">${roll}</div><h1 class="${won(roll) ? "win" : "lose"}">${won(roll) ? `You won ${b * 2.5} points` : `You lost ${b} points`}</h1>`;
+      html += `<p>Wait for the next round.</p>`;
+    } else html += `<h1>Your bet is locked.</h1><p>Results come after round 3.</p>`;
+  } else {
+    let total = 0, lines = "";
+    game.rolls.forEach((roll, i) => {
+      const b = bet(i + 1); if (b === undefined) return;
+      const p = payoff(b, roll); total += ENDOW + p;
+      lines += `<tr><td>Round ${i + 1}</td><td>Bet ${b}</td><td>Roll ${roll}</td><td class="${p >= 0 ? "win" : "lose"}">${p >= 0 ? "+" : ""}${p}</td></tr>`;
+    });
+    html += `<h1>Final: ${total} points</h1><table>${lines}</table><p class="muted">Look up at the screen for the group results.</p>`;
+  }
+  html += `</div>`;
+  app.innerHTML = html;
+
+  const amt = document.getElementById("amt");
+  if (amt) {
+    amt.oninput = () => { sliderVal = +amt.value; document.getElementById("val").textContent = sliderVal; };
+    amt.onpointerdown = () => typing = true; amt.onpointerup = () => typing = false;
+    document.getElementById("bet").onclick = () => { typing = false; act(() => placeBet(pid, grp, r, sliderVal)); };
+  }
+}
+
+async function tick() {
+  if (busy) return;
+  try {
+    if (isHost) await hostView();
+    else if (code) await playerView();
+    else app.innerHTML = `<div class="card"><h1>Bet or Hold</h1><p>Scan the QR code on the screen to join.</p><p class="muted">Presenter? <a href="?host">Start a game</a>.</p></div>`;
+  } catch (e) { console.error(e); }
+}
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>
